@@ -7,10 +7,6 @@ on:
     branches:
       - main
       - development
-    paths:
-      - 'backend/**'
-      - 'frontend/**'
-      - '.github/workflows/ci-cd.yml'
   pull_request:
     branches:
       - development
@@ -42,22 +38,44 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: orders
-        ports: [5433:5432]
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+        ports: [5433:5432]
+
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          node-version: '18'
-      - name: Install backend deps
-        run: cd backend && npm install
-      - name: Run backend tests
-        run: cd backend && npm test
+          python-version: '3.10'
+
+      # Order Service
+      - name: Install Order Service deps
+        run: |
+          cd backend/order_service
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Run Order Service tests
+        run: |
+          cd backend/order_service
+          pytest --maxfail=1 --disable-warnings -q
+
+      # Product Service
+      - name: Install Product Service deps
+        run: |
+          cd backend/product_service
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Run Product Service tests
+        run: |
+          cd backend/product_service
+          pytest --maxfail=1 --disable-warnings -q
+
+      # Build Docker Images
       - name: Azure Login
         uses: azure/login@v1
         with:
@@ -66,8 +84,11 @@ jobs:
         run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
       - name: Build & Push Backend Images
         run: |
-          docker build -t ${{ env.ACR_LOGIN_SERVER }}/backend:${{ env.IMAGE_TAG }} ./backend/
-          docker push ${{ env.ACR_LOGIN_SERVER }}/backend:${{ env.IMAGE_TAG }}
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ env.IMAGE_TAG }} ./backend/order_service
+          docker push ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ env.IMAGE_TAG }}
+
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ env.IMAGE_TAG }} ./backend/product_service
+          docker push ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ env.IMAGE_TAG }}
 
   # 2. Frontend Build
   frontend_build:
@@ -83,7 +104,7 @@ jobs:
         run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
       - name: Build & Push Frontend Image
         run: |
-          docker build -t ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }} ./frontend/
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }} ./frontend
           docker push ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }}
 
   # 3. Deploy Backend
@@ -111,12 +132,12 @@ jobs:
             --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
       - name: Deploy Backend to AKS
         run: |
-          kubectl apply -f k8s/configmaps.yaml
-          kubectl apply -f k8s/secrets.yaml
           kubectl apply -f k8s/product-db.yaml
           kubectl apply -f k8s/order-db.yaml
           kubectl apply -f k8s/product-service.yaml
           kubectl apply -f k8s/order-service.yaml
+          kubectl apply -f k8s/configmaps.yaml
+          kubectl apply -f k8s/secrets.yaml
 
   # 4. Deploy Frontend
   deploy_frontend:
@@ -137,4 +158,4 @@ jobs:
             --overwrite-existing
       - name: Deploy Frontend to AKS
         run: |
-          kubectl apply -f k8s/frontend-deployment.yaml
+          kubectl apply -f k8s/frontend.yaml

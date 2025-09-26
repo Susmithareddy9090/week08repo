@@ -1,0 +1,98 @@
+# .github/workflows/ci-cd.yml
+name: Unified CI/CD Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - development
+  pull_request:
+    branches:
+      - development
+
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+  IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
+
+jobs:
+  # 1. Backend Tests + Build
+  backend_test_build:
+    runs-on: ubuntu-latest
+    services:
+      product_db:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: products
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports: [5432:5432]
+      order_db:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: orders
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports: [5433:5432]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      # Ensure databases exist before tests
+      - name: Create test databases
+        run: |
+          sudo apt-get install -y postgresql-client
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE orders;" || true
+          PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE products;" || true
+
+      # Order Service
+      - name: Install Order Service deps
+        run: |
+          cd backend/order_service
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Run Order Service tests
+        run: |
+          cd backend/order_service
+          pytest --maxfail=1 --disable-warnings -q
+
+      # Product Service
+      - name: Install Product Service deps
+        run: |
+          cd backend/product_service
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Run Product Service tests
+        run: |
+          cd backend/product_service
+          pytest --maxfail=1 --disable-warnings -q
+
+      # Build Docker Images
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Login to ACR
+        run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
+      - name: Build & Push Backend Images
+        run: |
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ env.IMAGE_TAG }} ./backend/order_service
+          docker push ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ env.IMAGE_TAG }}
+
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ env.IMAGE_TAG }} ./backend/product_service
+          docker push ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ env.IMAGE_TAG }}
